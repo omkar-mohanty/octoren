@@ -1,22 +1,19 @@
+use crate::{
+    camera::{self, CameraResources},
+    renderer::{self, create_render_pipeline, CustomTriangleCallback, RenderResources},
+    texture::TextureResource,
+};
+use egui_wgpu::{self};
+use std::sync::{Arc, RwLock};
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)] // if we add new fields, give them default values when deserializing old state
+///
+
 pub struct TemplateApp {
     // Example stuff:
-    label: String,
-
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
-}
-
-impl Default for TemplateApp {
-    fn default() -> Self {
-        Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
-        }
-    }
+    viewport_height: f32,
+    viewport_width: f32,
+    outer_rect: Option<egui::Rect>,
+    camera_controller: Arc<RwLock<camera::CameraController>>,
 }
 
 impl TemplateApp {
@@ -27,19 +24,49 @@ impl TemplateApp {
 
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
-        if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
-        }
 
-        Default::default()
+        let wgpu_render_state = cc.wgpu_render_state.as_ref().unwrap().clone();
+        let camera_controller = Arc::new(RwLock::new(camera::CameraController::new(0.2)));
+
+        let (camera_bind_group, camera_bind_group_layout, camera_buffer, camera_uniform) =
+            camera::CameraResources::create_camera_bind_group(&wgpu_render_state.device);
+
+        let image_bytes = include_bytes!("happy-tree.png");
+        let mut texture_resource = TextureResource::new(&wgpu_render_state, image_bytes).unwrap();
+
+        let texture_bind_group_layout = texture_resource.get_bind_group(&wgpu_render_state);
+
+        let pipeline = Arc::new(create_render_pipeline(
+            &wgpu_render_state,
+            &[&camera_bind_group_layout, &texture_bind_group_layout],
+        ));
+
+        let camera = Arc::new(RwLock::new(camera::Camera::new()));
+
+        let render_state = renderer::Renderer::new(&wgpu_render_state, &pipeline);
+
+        render_state.add_resource(RenderResources::new(&wgpu_render_state, &pipeline));
+        render_state.add_resource(texture_resource);
+        render_state.add_resource(CameraResources {
+            camera_uniform,
+            camera_buffer,
+            camera: Arc::clone(&camera),
+            camera_controller: Arc::clone(&camera_controller),
+            camera_bind_group,
+            pipeline: Arc::clone(&pipeline),
+        });
+
+        Self {
+            viewport_height: 800.0,
+            viewport_width: 1280.0,
+            camera_controller,
+            outer_rect: None,
+        }
     }
 }
 
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    }
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -65,45 +92,46 @@ impl eframe::App for TemplateApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
+        ctx.input(|i| self.outer_rect = i.viewport().outer_rect);
 
+        egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
+                ui.add(egui::Slider::new(&mut self.viewport_width, 600.0..=2000.0));
+                ui.add(egui::Slider::new(&mut self.viewport_height, 600.0..=2000.0));
             });
 
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
-            }
-
-            ui.separator();
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
+            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                let mut style = egui::Style::default();
+                style.visuals.extreme_bg_color = egui::Color32::from_rgb(44, 53, 57);
+                egui::Frame::canvas(&style).show(ui, |ui| {
+                    self.custom_painting(ui);
+                });
+                ui.label("Drag to rotate!");
             });
         });
     }
 }
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
+impl TemplateApp {
+    fn custom_painting(&mut self, ui: &mut egui::Ui) {
+        let (rect, _response) = if let Some(rect) = self.outer_rect.as_ref() {
+            ui.allocate_exact_size(
+                egui::Vec2::new(rect.width(), rect.height()),
+                egui::Sense::drag(),
+            )
+        } else {
+            ui.allocate_exact_size(
+                egui::Vec2::new(self.viewport_width, self.viewport_height),
+                egui::Sense::drag().union(egui::Sense::click()),
+            )
+        };
+
+        let mut camera_controller = self.camera_controller.write().unwrap();
+        camera_controller.process_events(ui);
+
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            CustomTriangleCallback {},
+        ));
+    }
 }

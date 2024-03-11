@@ -15,12 +15,13 @@ fn main() -> eframe::Result<()> {
                 eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
                     .unwrap(),
             ),
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "Octoren",
         native_options,
-        Box::new(|cc| Box::new(eframe_template::TemplateApp::new(cc))),
+        Box::new(|cc| Box::new(octoren::TemplateApp::new(cc))),
     )
 }
 
